@@ -1,0 +1,27 @@
+# Copyright (C) UGA GINP  - All Rights Reserved
+# Written by Didier DONSEZ, 2016-2023
+
+# See https://hub.docker.com/r/thingsboard/tb-postgres
+
+# mkdir -p data/thingsboard/logs && sudo chown -R 799:799 data/thingsboard/logs
+# mkdir -p data/thingsboard/data && sudo chown -R 799:799 data/thingsboard/data
+
+# mkdir -p data/thingsboard/logs && sudo chown -R donsez:staff data/thingsboard/logs
+# mkdir -p data/thingsboard/data && sudo chown -R donsez:staff data/thingsboard/data
+
+version: "2"
+
+services:
+
+  thingsboard:
+    image: thingsboard/tb-postgres
+    ports:
+      - 9090:9090
+      - 1883:1883
+      # - 7070:7070 - connect local port 7070 to exposed internal Edge RPC port 7070
+      # - 5683-5688:5683-5688/udp - connect local UDP ports 5683-5688 to exposed internal COAP and LwM2M ports
+    volumes:
+      - ./data/thingsboard/data:/data
+      - ./data/thingsboard/logs:/var/log/thingsboard
+    restart: unless-stopped
+    network_mode: bridge
