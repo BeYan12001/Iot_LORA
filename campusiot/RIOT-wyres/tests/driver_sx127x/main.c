@@ -272,10 +272,62 @@ int send_cmd(int argc, char **argv)
     return 0;
 }
 
+char memory[100][128];
+int mem_index = 0;
+
+#define MAX_LISTEN_FILTERS 10
+static char listen_filter_srcs[MAX_LISTEN_FILTERS][64];
+static int  listen_filter_src_count = 0;
+static char listen_filter_dsts[MAX_LISTEN_FILTERS][64];
+static int  listen_filter_dst_count = 0;
+
+static int _parse_field(const char *msg, int want_src, char *out, size_t out_size);
+
 int listen_cmd(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    /* Reset filters */
+    listen_filter_src_count = 0;
+    listen_filter_dst_count = 0;
+    memset(listen_filter_srcs, 0, sizeof(listen_filter_srcs));
+    memset(listen_filter_dsts, 0, sizeof(listen_filter_dsts));
+
+    /* Parse @src and #dst filter arguments */
+    for (int i = 1; i < argc; i++) {
+        if (argv[i][0] == '@' && listen_filter_src_count < MAX_LISTEN_FILTERS) {
+            strncpy(listen_filter_srcs[listen_filter_src_count], argv[i] + 1,
+                    sizeof(listen_filter_srcs[0]) - 1);
+            listen_filter_srcs[listen_filter_src_count][sizeof(listen_filter_srcs[0]) - 1] = '\0';
+            listen_filter_src_count++;
+        }
+        else if (argv[i][0] == '#' && listen_filter_dst_count < MAX_LISTEN_FILTERS) {
+            strncpy(listen_filter_dsts[listen_filter_dst_count], argv[i] + 1,
+                    sizeof(listen_filter_dsts[0]) - 1);
+            listen_filter_dsts[listen_filter_dst_count][sizeof(listen_filter_dsts[0]) - 1] = '\0';
+            listen_filter_dst_count++;
+        }
+    }
+
+    if (listen_filter_src_count == 0 && listen_filter_dst_count == 0) {
+        puts("Listening to all messages");
+    }
+    else {
+        if (listen_filter_src_count > 0) {
+            printf("Sources  : ");
+            for (int i = 0; i < listen_filter_src_count; i++) {
+                printf("@%s%s", listen_filter_srcs[i],
+                       i < listen_filter_src_count - 1 ? ", " : "");
+            }
+            puts("");
+        }
+        if (listen_filter_dst_count > 0) {
+            printf("Channels : ");
+            for (int i = 0; i < listen_filter_dst_count; i++) {
+                printf("#%s%s", listen_filter_dsts[i],
+                       i < listen_filter_dst_count - 1 ? ", " : "");
+            }
+            puts("");
+        }
+    }
 
     netdev_t *netdev = &sx127x.netdev;
     /* Switch to continuous listen mode */
@@ -482,10 +534,6 @@ int test_cmd(int argc, char **argv)
 }
 
 
-char memory[100][128];
-int mem_index = 0;
-
-
 static void _event_cb(netdev_t *dev, netdev_event_t event)
 {
     if (event == NETDEV_EVENT_ISR) {
@@ -509,6 +557,33 @@ static void _event_cb(netdev_t *dev, netdev_event_t event)
         case NETDEV_EVENT_RX_COMPLETE:
             len = dev->driver->recv(dev, NULL, 0, 0);
             dev->driver->recv(dev, message, len, &packet_info);
+
+            /* Apply listen filters (@src / #dst) if any are set */
+            if (listen_filter_src_count > 0 || listen_filter_dst_count > 0) {
+                char msg_src[64], msg_dst[64];
+                int src_ok = (_parse_field(message, 1, msg_src, sizeof(msg_src)) == 0);
+                int dst_ok = (_parse_field(message, 0, msg_dst, sizeof(msg_dst)) == 0);
+                int match = 0;
+
+                if (src_ok) {
+                    for (int fi = 0; fi < listen_filter_src_count && !match; fi++) {
+                        if (strcmp(msg_src, listen_filter_srcs[fi]) == 0) {
+                            match = 1;
+                        }
+                    }
+                }
+                if (!match && dst_ok) {
+                    for (int fi = 0; fi < listen_filter_dst_count && !match; fi++) {
+                        if (strcmp(msg_dst, listen_filter_dsts[fi]) == 0) {
+                            match = 1;
+                        }
+                    }
+                }
+                if (!match) {
+                    break; /* filtered out */
+                }
+            }
+
             printf(
                 "{Payload: \"%s\" (%d bytes), RSSI: %i, SNR: %i, TOA: %" PRIu32 "}\n",
                 message, (int)len,
@@ -716,7 +791,7 @@ static const shell_command_t shell_commands[] = {
     { "channel",  "Get/Set channel frequency (in Hz)",       channel_cmd },
     { "register", "Get/Set value(s) of registers of sx127x", register_cmd },
     { "send",     "Send raw payload string",                 send_cmd },
-    { "listen",   "Start raw payload listener",              listen_cmd },
+    { "listen",   "Listen: [@src...] [#dst...] (no args = all)", listen_cmd },
     { "reset",    "Reset the sx127x device",                 reset_cmd },
     { "test",    "Test the sx127x device",                 test_cmd },
     { "memory",    "Memory all messages",                 memory_cmd },
