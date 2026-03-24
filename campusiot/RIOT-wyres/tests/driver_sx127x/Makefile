@@ -3,7 +3,7 @@ APPLICATION = test-driver-sx127x
 
 # This has to be the absolute path to the RIOT base directory:
 #RIOTBASE ?= ../../../../RIOT-OS/RIOT
-RIOTBASE ?= ${HOME}/github/RIOT-OS/RIOT
+RIOTBASE ?= $(HOME)/Documents/M2/Iot_LORA/RIOT-OS/RIOT
 
 # Path to my boards
 EXTERNAL_BOARD_DIRS ?= ../../boards
@@ -15,8 +15,8 @@ BOARD ?= wyres-base
 USEMODULE += od
 USEMODULE += ps
 USEMODULE += shell
-USEMODULE += shell_cmds_default
-#USEMODULE += shell_commands
+#USEMODULE += shell_cmds_default
+USEMODULE += shell_commands
 USEMODULE += fmt
 
 DRIVER ?= sx1272
@@ -27,6 +27,7 @@ USEMODULE += $(DRIVER)
 CFLAGS_DBG = 
 
 CFLAGS += -DISR_STACKSIZE=1024U
+CFLAGS += -Wno-address
 #CFLAGS += -DSX127X_STACKSIZE=1024U
 
 

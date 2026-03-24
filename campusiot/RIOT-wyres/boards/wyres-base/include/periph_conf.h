@@ -38,8 +38,8 @@ extern "C" {
 #endif
 
 /* The HSE provides a 16 MHz clock */
-#ifndef CONFIG_CLOCK_HSE
-#define CONFIG_CLOCK_HSE MHZ(16)
+#ifndef CLOCK_HSE
+#define CLOCK_HSE MHZ(16)
 #endif
 //#endif
 
