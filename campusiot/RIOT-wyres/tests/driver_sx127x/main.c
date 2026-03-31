@@ -49,10 +49,20 @@
 
 #define MSG_TYPE_ISR            (0x3456)
 
+/* Application limits */
+#define MAX_NAME_LEN            (4)
+#define NAME_BUF_SIZE           (MAX_NAME_LEN + 1)
+#define ADDRESS_BUF_SIZE        (MAX_NAME_LEN + 2)
+#define MAX_CONTACTS            (40)
+#define MAX_FAVORIS             (10)
+#define MAX_LISTEN_FILTERS      (10)
+#define MAX_STORED_MESSAGES     (100)
+#define MESSAGE_BUF_SIZE        (128)
+
 static char stack[SX127X_STACKSIZE];
 static kernel_pid_t _recv_pid;
 
-static char message[32];
+static char message[MESSAGE_BUF_SIZE];
 static sx127x_t sx127x;
 
 int lora_setup_cmd(int argc, char **argv)
@@ -236,9 +246,9 @@ int register_cmd(int argc, char **argv)
     return 0;
 }
 
-char src[64]="M2GI8-G1";
-char dst[64]="*";
-int compteur=1;
+char src[NAME_BUF_SIZE] = "B2MG";
+char dst[ADDRESS_BUF_SIZE] = "#M2G";
+int compteur = 1;
 
 int send_cmd(int argc, char **argv)
 {
@@ -247,12 +257,23 @@ int send_cmd(int argc, char **argv)
         return -1;
     }
 
-    char payload[128];
-    int payload_len = snprintf(payload, sizeof(payload), "%s@%s:%d:%s",
-                               src, dst, compteur, argv[1]);
+    char payload[MESSAGE_BUF_SIZE];
+    int payload_len = snprintf(payload, sizeof(payload), "%s%s:%d:",
+                               src, dst, compteur);
     if (payload_len < 0 || (size_t)payload_len >= sizeof(payload)) {
         puts("send: payload too long");
         return -1;
+    }
+
+    for (int i = 1; i < argc; i++) {
+        int written = snprintf(payload + payload_len,
+                               sizeof(payload) - (size_t)payload_len,
+                               "%s%s", (i > 1) ? " " : "", argv[i]);
+        if (written < 0 || (size_t)written >= (sizeof(payload) - (size_t)payload_len)) {
+            puts("send: payload too long");
+            return -1;
+        }
+        payload_len += written;
     }
 
     printf("sending \"%s\" payload (%d bytes)\n", payload, payload_len + 1);
@@ -272,28 +293,41 @@ int send_cmd(int argc, char **argv)
     return 0;
 }
 
-char memory[100][128];
+char memory[MAX_STORED_MESSAGES][MESSAGE_BUF_SIZE];
 int mem_index = 0;
 
-#define MAX_LISTEN_FILTERS 10
-static char listen_filter_srcs[MAX_LISTEN_FILTERS][64];
+static char listen_filter_srcs[MAX_LISTEN_FILTERS][NAME_BUF_SIZE];
 static int  listen_filter_src_count = 0;
-static char listen_filter_dsts[MAX_LISTEN_FILTERS][64];
+static char listen_filter_dsts[MAX_LISTEN_FILTERS][NAME_BUF_SIZE];
 static int  listen_filter_dst_count = 0;
+static int  listen_filter_favoris = 0;
 
+static char favoris[MAX_FAVORIS][ADDRESS_BUF_SIZE];
+static int  favoris_count = 0;
+
+static int _parse_message_header(const char *msg, char *src_out, size_t src_size,
+                                 char *dst_out, size_t dst_size, char *sep_out);
 static int _parse_field(const char *msg, int want_src, char *out, size_t out_size);
+static int _is_favori(const char *name);
+static int _match_favori_src(const char *src_name);
+static int _match_favori_dst(char sep, const char *dst_name);
+int favoris_cmd(int argc, char **argv);
 
 int listen_cmd(int argc, char **argv)
 {
     /* Reset filters */
     listen_filter_src_count = 0;
     listen_filter_dst_count = 0;
+    listen_filter_favoris = 0;
     memset(listen_filter_srcs, 0, sizeof(listen_filter_srcs));
     memset(listen_filter_dsts, 0, sizeof(listen_filter_dsts));
 
-    /* Parse @src and #dst filter arguments */
+    /* Parse @src, #dst and favoris filter arguments */
     for (int i = 1; i < argc; i++) {
-        if (argv[i][0] == '@' && listen_filter_src_count < MAX_LISTEN_FILTERS) {
+        if (strcmp(argv[i], "favoris") == 0) {
+            listen_filter_favoris = 1;
+        }
+        else if (argv[i][0] == '@' && listen_filter_src_count < MAX_LISTEN_FILTERS) {
             strncpy(listen_filter_srcs[listen_filter_src_count], argv[i] + 1,
                     sizeof(listen_filter_srcs[0]) - 1);
             listen_filter_srcs[listen_filter_src_count][sizeof(listen_filter_srcs[0]) - 1] = '\0';
@@ -307,7 +341,8 @@ int listen_cmd(int argc, char **argv)
         }
     }
 
-    if (listen_filter_src_count == 0 && listen_filter_dst_count == 0) {
+    if (listen_filter_src_count == 0 && listen_filter_dst_count == 0 &&
+        !listen_filter_favoris) {
         puts("Listening to all messages");
     }
     else {
@@ -326,6 +361,9 @@ int listen_cmd(int argc, char **argv)
                        i < listen_filter_dst_count - 1 ? ", " : "");
             }
             puts("");
+        }
+        if (listen_filter_favoris) {
+            puts("Filter   : favoris");
         }
     }
 
@@ -558,25 +596,35 @@ static void _event_cb(netdev_t *dev, netdev_event_t event)
             len = dev->driver->recv(dev, NULL, 0, 0);
             dev->driver->recv(dev, message, len, &packet_info);
 
-            /* Apply listen filters (@src / #dst) if any are set */
-            if (listen_filter_src_count > 0 || listen_filter_dst_count > 0) {
-                char msg_src[64], msg_dst[64];
-                int src_ok = (_parse_field(message, 1, msg_src, sizeof(msg_src)) == 0);
-                int dst_ok = (_parse_field(message, 0, msg_dst, sizeof(msg_dst)) == 0);
+            /* Apply listen filters (@src / #dst / favoris) if any are set */
+            if (listen_filter_src_count > 0 || listen_filter_dst_count > 0 ||
+                listen_filter_favoris) {
+                char msg_src[NAME_BUF_SIZE], msg_dst[NAME_BUF_SIZE];
+                char msg_sep = '\0';
+                int header_ok = (_parse_message_header(message,
+                                  msg_src, sizeof(msg_src),
+                                  msg_dst, sizeof(msg_dst),
+                                  &msg_sep) == 0);
                 int match = 0;
 
-                if (src_ok) {
+                if (header_ok) {
                     for (int fi = 0; fi < listen_filter_src_count && !match; fi++) {
                         if (strcmp(msg_src, listen_filter_srcs[fi]) == 0) {
                             match = 1;
                         }
                     }
                 }
-                if (!match && dst_ok) {
+                if (!match && header_ok && msg_sep == '#') {
                     for (int fi = 0; fi < listen_filter_dst_count && !match; fi++) {
                         if (strcmp(msg_dst, listen_filter_dsts[fi]) == 0) {
                             match = 1;
                         }
+                    }
+                }
+                if (!match && listen_filter_favoris) {
+                    if ((header_ok && _match_favori_src(msg_src)) ||
+                        (header_ok && _match_favori_dst(msg_sep, msg_dst))) {
+                        match = 1;
                     }
                 }
                 if (!match) {
@@ -593,7 +641,7 @@ static void _event_cb(netdev_t *dev, netdev_event_t event)
             
             strncpy(memory[mem_index], message, sizeof(memory[mem_index]) - 1);
             memory[mem_index][sizeof(memory[mem_index]) - 1] = '\0';
-            mem_index = (mem_index + 1) % 100;
+            mem_index = (mem_index + 1) % MAX_STORED_MESSAGES;
 
             break;
 
@@ -678,7 +726,7 @@ int memory_cmd(int argc, char **argv)
 
     puts("Stored messages:");
     int count = 0;
-    for (int i = 0; i < 100; i++) {
+    for (int i = 0; i < MAX_STORED_MESSAGES; i++) {
         if (memory[i][0] != '\0') {
             printf("[%d] %s\n", i, memory[i]);
             count++;
@@ -690,30 +738,191 @@ int memory_cmd(int argc, char **argv)
     return 0;
 }
 
-/* Extract src or dst from a message of the form "src@dst:compteur:msg".
- * Writes the extracted field into out (size out_size).
+/* Extract the fixed-size header from a message of the form
+ * "src[4]@dst[4]:compteur:msg" or "src[4]#dst[4]:compteur:msg".
  * Returns 0 on success, -1 if the format is not recognized. */
+static int _parse_message_header(const char *msg, char *src_out, size_t src_size,
+                                 char *dst_out, size_t dst_size, char *sep_out)
+{
+    if (strlen(msg) < (size_t)(MAX_NAME_LEN * 2 + 2)) {
+        return -1;
+    }
+
+    if (msg[MAX_NAME_LEN] != '@' && msg[MAX_NAME_LEN] != '#') {
+        return -1;
+    }
+
+    if (msg[(MAX_NAME_LEN * 2) + 1] != ':') {
+        return -1;
+    }
+
+    if (src_out != NULL) {
+        if (src_size < NAME_BUF_SIZE) {
+            return -1;
+        }
+        memcpy(src_out, msg, MAX_NAME_LEN);
+        src_out[MAX_NAME_LEN] = '\0';
+    }
+
+    if (dst_out != NULL) {
+        if (dst_size < NAME_BUF_SIZE) {
+            return -1;
+        }
+        memcpy(dst_out, msg + MAX_NAME_LEN + 1, MAX_NAME_LEN);
+        dst_out[MAX_NAME_LEN] = '\0';
+    }
+
+    if (sep_out != NULL) {
+        *sep_out = msg[MAX_NAME_LEN];
+    }
+
+    return 0;
+}
+
+/* Extract src or dst from a message.
+ * For src, the returned value is "src".
+ * For dst, the returned value is "@dst" or "#dst". */
 static int _parse_field(const char *msg, int want_src, char *out, size_t out_size)
 {
-    char buf[128];
-    strncpy(buf, msg, sizeof(buf) - 1);
-    buf[sizeof(buf) - 1] = '\0';
+    char src_name[NAME_BUF_SIZE];
+    char dst_name[NAME_BUF_SIZE];
+    char sep;
 
-    char *at = strchr(buf, '@');
-    if (!at) return -1;
+    if (_parse_message_header(msg, src_name, sizeof(src_name),
+                              dst_name, sizeof(dst_name), &sep) != 0) {
+        return -1;
+    }
 
     if (want_src) {
-        *at = '\0';
-        strncpy(out, buf, out_size - 1);
-        out[out_size - 1] = '\0';
-    } else {
-        char *colon = strchr(at + 1, ':');
-        if (!colon) return -1;
-        *colon = '\0';
-        strncpy(out, at + 1, out_size - 1);
+        strncpy(out, src_name, out_size - 1);
         out[out_size - 1] = '\0';
     }
+    else {
+        int len = snprintf(out, out_size, "%c%s", sep, dst_name);
+        if (len < 0 || (size_t)len >= out_size) {
+            return -1;
+        }
+        out[out_size - 1] = '\0';
+    }
+
     return 0;
+}
+
+static int _is_favori(const char *name)
+{
+    for (int i = 0; i < favoris_count; i++) {
+        if (strcmp(favoris[i], name) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int _match_favori_src(const char *src_name)
+{
+    char prefixed_src[ADDRESS_BUF_SIZE];
+    int len = snprintf(prefixed_src, sizeof(prefixed_src), "@%s", src_name);
+
+    if (len < 0 || (size_t)len >= sizeof(prefixed_src)) {
+        return 0;
+    }
+
+    return _is_favori(prefixed_src);
+}
+
+static int _match_favori_dst(char sep, const char *dst_name)
+{
+    char prefixed_dst[ADDRESS_BUF_SIZE];
+    int len = snprintf(prefixed_dst, sizeof(prefixed_dst), "%c%s", sep, dst_name);
+
+    if (len < 0 || (size_t)len >= sizeof(prefixed_dst)) {
+        return 0;
+    }
+
+    return _is_favori(prefixed_dst);
+}
+
+int favoris_cmd(int argc, char **argv)
+{
+    if (argc < 2) {
+        puts("usage: favoris <list|add|remove|clear> [name]");
+        return -1;
+    }
+
+    if (strcmp(argv[1], "list") == 0) {
+        if (favoris_count == 0) {
+            puts("No favorites configured.");
+            return 0;
+        }
+
+        puts("Favorites:");
+        for (int i = 0; i < favoris_count; i++) {
+            printf("[%d] %s\n", i, favoris[i]);
+        }
+        return 0;
+    }
+
+    if (strcmp(argv[1], "add") == 0) {
+        if (argc < 3) {
+            puts("usage: favoris add <name>");
+            return -1;
+        }
+        if ((argv[2][0] != '@' && argv[2][0] != '#') || argv[2][1] == '\0') {
+            puts("favoris add: use @name for a person or #name for a channel.");
+            return -1;
+        }
+        if (strlen(argv[2] + 1) != MAX_NAME_LEN) {
+            printf("favoris add: name must be exactly %d characters.\n", MAX_NAME_LEN);
+            return -1;
+        }
+        if (_is_favori(argv[2])) {
+            printf("%s is already in favorites.\n", argv[2]);
+            return 0;
+        }
+        if (favoris_count >= MAX_FAVORIS) {
+            puts("Favorites list is full.");
+            return -1;
+        }
+
+        strncpy(favoris[favoris_count], argv[2], sizeof(favoris[0]) - 1);
+        favoris[favoris_count][sizeof(favoris[0]) - 1] = '\0';
+        favoris_count++;
+        printf("%s added to favorites.\n", argv[2]);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "remove") == 0) {
+        if (argc < 3) {
+            puts("usage: favoris remove <name>");
+            return -1;
+        }
+
+        for (int i = 0; i < favoris_count; i++) {
+            if (strcmp(favoris[i], argv[2]) == 0) {
+                for (int j = i; j < favoris_count - 1; j++) {
+                    strncpy(favoris[j], favoris[j + 1], sizeof(favoris[j]) - 1);
+                    favoris[j][sizeof(favoris[j]) - 1] = '\0';
+                }
+                memset(favoris[favoris_count - 1], 0, sizeof(favoris[favoris_count - 1]));
+                favoris_count--;
+                printf("%s removed from favorites.\n", argv[2]);
+                return 0;
+            }
+        }
+
+        printf("%s not found in favorites.\n", argv[2]);
+        return -1;
+    }
+
+    if (strcmp(argv[1], "clear") == 0) {
+        memset(favoris, 0, sizeof(favoris));
+        favoris_count = 0;
+        puts("Favorites cleared.");
+        return 0;
+    }
+
+    puts("usage: favoris <list|add|remove|clear> [name]");
+    return -1;
 }
 
 int filter_cmd(int argc, char **argv)
@@ -725,15 +934,15 @@ int filter_cmd(int argc, char **argv)
     }
 
     int want_src = (strcmp(argv[1], "src") == 0);
-    char field[128];
+    char field[ADDRESS_BUF_SIZE];
 
     if (argc == 2) {
         /* List all unique src or dst values */
-        static char seen[100][64];
+        static char seen[MAX_CONTACTS][ADDRESS_BUF_SIZE];
         int seen_count = 0;
         memset(seen, 0, sizeof(seen));
 
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < MAX_STORED_MESSAGES; i++) {
             if (memory[i][0] == '\0') continue;
             if (_parse_field(memory[i], want_src, field, sizeof(field)) != 0) continue;
 
@@ -741,7 +950,7 @@ int filter_cmd(int argc, char **argv)
             for (int j = 0; j < seen_count; j++) {
                 if (strcmp(seen[j], field) == 0) { found = 1; break; }
             }
-            if (!found && seen_count < 100) {
+            if (!found && seen_count < MAX_CONTACTS) {
                 strncpy(seen[seen_count], field, sizeof(seen[seen_count]) - 1);
                 seen[seen_count][sizeof(seen[seen_count]) - 1] = '\0';
                 seen_count++;
@@ -762,7 +971,7 @@ int filter_cmd(int argc, char **argv)
         int count = 0;
 
         printf("Messages with %s=%s:\n", argv[1], filter_val);
-        for (int i = 0; i < 100; i++) {
+        for (int i = 0; i < MAX_STORED_MESSAGES; i++) {
             if (memory[i][0] == '\0') continue;
             if (_parse_field(memory[i], want_src, field, sizeof(field)) != 0) continue;
             if (strcmp(field, filter_val) == 0) {
@@ -791,11 +1000,13 @@ static const shell_command_t shell_commands[] = {
     { "channel",  "Get/Set channel frequency (in Hz)",       channel_cmd },
     { "register", "Get/Set value(s) of registers of sx127x", register_cmd },
     { "send",     "Send raw payload string",                 send_cmd },
-    { "listen",   "Listen: [@src...] [#dst...] (no args = all)", listen_cmd },
+    { "listen",   "Listen: [favoris] [@src...] [#dst...] (no args = all)", listen_cmd },
     { "reset",    "Reset the sx127x device",                 reset_cmd },
     { "test",    "Test the sx127x device",                 test_cmd },
     { "memory",    "Memory all messages",                 memory_cmd },
     { "filter",    "Filter messages by src/dst",           filter_cmd },
+    { "favoris",    "Manage favorites: list | add | remove | clear", favoris_cmd },
+
     { NULL, NULL, NULL }
 };
 
@@ -811,4 +1022,3 @@ int main(void) {
 
     return 0;
 }
-
