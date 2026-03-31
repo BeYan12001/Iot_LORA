@@ -134,6 +134,40 @@ Les identifiants source et destination font exactement 4 caractères.
 
 Il reste possible de combiner `favoris` avec les filtres existants `@src` et `#dst`.
 
+---
+
+## Relais multi-sauts simple
+
+Le programme accepte maintenant aussi les messages au format :
+`src[4]@dst[4]:compteur,ttl:contenu`
+ou
+`src[4]#dst[4]:compteur,ttl:contenu`
+
+Exemple :
+```bash
+B2MG#M2GI:18,3:Salut en multi-sauts
+```
+
+Si un message reçu contient un `ttl`, le noeud peut le relayer immédiatement avec
+un `ttl` décrémenté, mais seulement si le `SNR` reçu est inférieur ou égal au seuil
+configuré.
+
+## Commande `threshold`
+
+La commande `threshold` permet d'afficher ou modifier le seuil `SNRThreshold`
+utilisé pour décider si un message doit être relayé.
+
+**Afficher la valeur courante :**
+```bash
+> threshold
+> threshold get
+```
+
+**Modifier le seuil :**
+```bash
+> threshold set 5
+```
+
 
 
 

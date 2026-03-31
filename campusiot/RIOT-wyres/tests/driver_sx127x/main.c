@@ -58,12 +58,42 @@
 #define MAX_LISTEN_FILTERS      (10)
 #define MAX_STORED_MESSAGES     (100)
 #define MESSAGE_BUF_SIZE        (128)
+#define MAX_RELAY_TRACKED       (32)
 
 static char stack[SX127X_STACKSIZE];
 static kernel_pid_t _recv_pid;
 
 static char message[MESSAGE_BUF_SIZE];
 static sx127x_t sx127x;
+
+typedef struct {
+    char src[NAME_BUF_SIZE];
+    char dst[NAME_BUF_SIZE];
+    char sep;
+    int counter;
+    int ttl;
+    int has_ttl;
+    const char *body;
+} routed_message_t;
+
+typedef struct {
+    char src[NAME_BUF_SIZE];
+    char dst[NAME_BUF_SIZE];
+    char sep;
+    int counter;
+    int8_t best_snr;
+    uint8_t relayed;
+    uint8_t used;
+} relay_entry_t;
+
+static relay_entry_t relay_entries[MAX_RELAY_TRACKED];
+static int8_t snr_threshold = 0;
+
+static int _send_payload(char *payload);
+static int _parse_routed_message(const char *msg, routed_message_t *parsed);
+static relay_entry_t *_find_relay_entry(const routed_message_t *parsed);
+static relay_entry_t *_get_or_create_relay_entry(const routed_message_t *parsed);
+static void _maybe_relay_message(const char *rx_msg, int8_t snr);
 
 int lora_setup_cmd(int argc, char **argv)
 {
@@ -248,7 +278,31 @@ int register_cmd(int argc, char **argv)
 
 char src[NAME_BUF_SIZE] = "B2MG";
 char dst[ADDRESS_BUF_SIZE] = "#M2G";
+int ttl = 5;
+
 int compteur = 1;
+
+static int _send_payload(char *payload)
+{
+    size_t payload_len = strlen(payload);
+
+    printf("sending \"%s\" payload (%u bytes)\n", payload,
+           (unsigned)(payload_len + 1));
+
+    iolist_t iolist = {
+        .iol_base = payload,
+        .iol_len  = payload_len + 1
+    };
+
+    netdev_t *netdev = &sx127x.netdev;
+
+    if (netdev->driver->send(netdev, &iolist) == -ENOTSUP) {
+        puts("Cannot send: radio is still transmitting");
+        return -1;
+    }
+
+    return 0;
+}
 
 int send_cmd(int argc, char **argv)
 {
@@ -258,8 +312,8 @@ int send_cmd(int argc, char **argv)
     }
 
     char payload[MESSAGE_BUF_SIZE];
-    int payload_len = snprintf(payload, sizeof(payload), "%s%s:%d:",
-                               src, dst, compteur);
+    int payload_len = snprintf(payload, sizeof(payload), "%s%s:%d,%d:",
+                               src, dst, compteur, ttl);
     if (payload_len < 0 || (size_t)payload_len >= sizeof(payload)) {
         puts("send: payload too long");
         return -1;
@@ -276,21 +330,9 @@ int send_cmd(int argc, char **argv)
         payload_len += written;
     }
 
-    printf("sending \"%s\" payload (%d bytes)\n", payload, payload_len + 1);
-
-    iolist_t iolist = {
-        .iol_base = payload,
-        .iol_len  = (size_t)(payload_len + 1)
-    };
-
-    netdev_t *netdev = &sx127x.netdev;
     compteur++;
 
-    if (netdev->driver->send(netdev, &iolist) == -ENOTSUP) {
-        puts("Cannot send: radio is still transmitting");
-    }
-
-    return 0;
+    return _send_payload(payload);
 }
 
 char memory[MAX_STORED_MESSAGES][MESSAGE_BUF_SIZE];
@@ -557,6 +599,30 @@ int payload_cmd(int argc, char **argv)
     return 0;
 }
 
+int threshold_cmd(int argc, char **argv)
+{
+    if (argc == 1 || strcmp(argv[1], "get") == 0) {
+        printf("SNR threshold: %d\n", snr_threshold);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "set") != 0 || argc < 3) {
+        puts("usage: threshold [get|set <snr>]");
+        return -1;
+    }
+
+    char *endptr;
+    long value = strtol(argv[2], &endptr, 10);
+    if (*argv[2] == '\0' || *endptr != '\0' || value < -128 || value > 127) {
+        puts("threshold: invalid SNR value");
+        return -1;
+    }
+
+    snr_threshold = (int8_t)value;
+    printf("SNR threshold set to %d\n", snr_threshold);
+    return 0;
+}
+
 int test_cmd(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++) {
@@ -642,6 +708,8 @@ static void _event_cb(netdev_t *dev, netdev_event_t event)
             strncpy(memory[mem_index], message, sizeof(memory[mem_index]) - 1);
             memory[mem_index][sizeof(memory[mem_index]) - 1] = '\0';
             mem_index = (mem_index + 1) % MAX_STORED_MESSAGES;
+
+            _maybe_relay_message(message, packet_info.snr);
 
             break;
 
@@ -806,6 +874,159 @@ static int _parse_field(const char *msg, int want_src, char *out, size_t out_siz
     }
 
     return 0;
+}
+
+static int _parse_routed_message(const char *msg, routed_message_t *parsed)
+{
+    const char *meta;
+    const char *body;
+    long counter;
+    long ttl = 0;
+    char *endptr;
+
+    if (_parse_message_header(msg, parsed->src, sizeof(parsed->src),
+                              parsed->dst, sizeof(parsed->dst),
+                              &parsed->sep) != 0) {
+        return -1;
+    }
+
+    meta = msg + (MAX_NAME_LEN * 2) + 2;
+    body = strchr(meta, ':');
+    if (body == NULL || body == meta) {
+        return -1;
+    }
+
+    counter = strtol(meta, &endptr, 10);
+    if (endptr == meta || counter < 0) {
+        return -1;
+    }
+
+    parsed->counter = (int)counter;
+    parsed->ttl = 0;
+    parsed->has_ttl = 0;
+
+    if (*endptr == ',') {
+        ttl = strtol(endptr + 1, &endptr, 10);
+        if (ttl < 0) {
+            return -1;
+        }
+        parsed->ttl = (int)ttl;
+        parsed->has_ttl = 1;
+    }
+
+    if (endptr != body) {
+        return -1;
+    }
+
+    parsed->body = body + 1;
+    return 0;
+}
+
+static relay_entry_t *_find_relay_entry(const routed_message_t *parsed)
+{
+    for (int i = 0; i < MAX_RELAY_TRACKED; i++) {
+        if (!relay_entries[i].used) {
+            continue;
+        }
+        if (relay_entries[i].sep == parsed->sep &&
+            relay_entries[i].counter == parsed->counter &&
+            strcmp(relay_entries[i].src, parsed->src) == 0 &&
+            strcmp(relay_entries[i].dst, parsed->dst) == 0) {
+            return &relay_entries[i];
+        }
+    }
+
+    return NULL;
+}
+
+static relay_entry_t *_get_or_create_relay_entry(const routed_message_t *parsed)
+{
+    relay_entry_t *slot = _find_relay_entry(parsed);
+
+    if (slot != NULL) {
+        return slot;
+    }
+
+    for (int i = 0; i < MAX_RELAY_TRACKED; i++) {
+        if (relay_entries[i].used) {
+            continue;
+        }
+
+        relay_entries[i].used = 1;
+        relay_entries[i].relayed = 0;
+        relay_entries[i].best_snr = -128;
+        relay_entries[i].sep = parsed->sep;
+        relay_entries[i].counter = parsed->counter;
+        strncpy(relay_entries[i].src, parsed->src, sizeof(relay_entries[i].src) - 1);
+        relay_entries[i].src[sizeof(relay_entries[i].src) - 1] = '\0';
+        strncpy(relay_entries[i].dst, parsed->dst, sizeof(relay_entries[i].dst) - 1);
+        relay_entries[i].dst[sizeof(relay_entries[i].dst) - 1] = '\0';
+        return &relay_entries[i];
+    }
+
+    relay_entries[0].used = 1;
+    relay_entries[0].relayed = 0;
+    relay_entries[0].best_snr = -128;
+    relay_entries[0].sep = parsed->sep;
+    relay_entries[0].counter = parsed->counter;
+    strncpy(relay_entries[0].src, parsed->src, sizeof(relay_entries[0].src) - 1);
+    relay_entries[0].src[sizeof(relay_entries[0].src) - 1] = '\0';
+    strncpy(relay_entries[0].dst, parsed->dst, sizeof(relay_entries[0].dst) - 1);
+    relay_entries[0].dst[sizeof(relay_entries[0].dst) - 1] = '\0';
+    return &relay_entries[0];
+}
+
+static void _maybe_relay_message(const char *rx_msg, int8_t snr)
+{
+    routed_message_t parsed;
+    relay_entry_t *entry;
+    char relay_payload[MESSAGE_BUF_SIZE];
+    int next_ttl;
+    int written;
+
+    if (_parse_routed_message(rx_msg, &parsed) != 0 || !parsed.has_ttl) {
+        return;
+    }
+
+    entry = _get_or_create_relay_entry(&parsed);
+    if (entry == NULL) {
+        puts("relay: no slot available");
+        return;
+    }
+
+    if (snr > entry->best_snr) {
+        entry->best_snr = snr;
+    }
+
+    if (entry->relayed) {
+        return;
+    }
+
+    if (entry->best_snr > snr_threshold) {
+        printf("relay: skip %s%c%s:%d because SNR %d > threshold %d\n",
+               parsed.src, parsed.sep, parsed.dst, parsed.counter,
+               entry->best_snr, snr_threshold);
+        return;
+    }
+
+    if (parsed.ttl <= 0) {
+        return;
+    }
+
+    next_ttl = parsed.ttl - 1;
+    written = snprintf(relay_payload, sizeof(relay_payload),
+                       "%s%c%s:%d,%d:%s",
+                       parsed.src, parsed.sep, parsed.dst,
+                       parsed.counter, next_ttl, parsed.body);
+    if (written < 0 || (size_t)written >= sizeof(relay_payload)) {
+        puts("relay: payload too long");
+        return;
+    }
+
+    if (_send_payload(relay_payload) == 0) {
+        entry->relayed = 1;
+        printf("relay: forwarded with ttl %d -> %d\n", parsed.ttl, next_ttl);
+    }
 }
 
 static int _is_favori(const char *name)
@@ -1000,6 +1221,7 @@ static const shell_command_t shell_commands[] = {
     { "channel",  "Get/Set channel frequency (in Hz)",       channel_cmd },
     { "register", "Get/Set value(s) of registers of sx127x", register_cmd },
     { "send",     "Send raw payload string",                 send_cmd },
+    { "threshold","Get/Set relay SNR threshold",             threshold_cmd },
     { "listen",   "Listen: [favoris] [@src...] [#dst...] (no args = all)", listen_cmd },
     { "reset",    "Reset the sx127x device",                 reset_cmd },
     { "test",    "Test the sx127x device",                 test_cmd },
