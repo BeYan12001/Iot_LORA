@@ -222,3 +222,24 @@ Key_salon : AES128 c'est un PSK
 On peut mettre en place un mecanisme de TraceRoute
 Lister les contact quon a decouvert. on nettoie on virant les moins recent (plus ancien) (table de 40 ) 
 send
+
+
+
+Soutenance : 
+
+10 min par groupe : 
+- 4 min de presentation avec slides ( max 4)
+- 3 min de démo
+
+Il faut déposer le repo ( ou le rendre accesible ) avec un petit readme et les fonctions commentées. Pas de ChatGPT
+
+Présenter les commandes / fonctionnalité. 
+
+
+
+A FAIRE :
+- EEPROM
+- Relay avec SNR et ttl
+- Favoris
+- Memory
+- Filter
