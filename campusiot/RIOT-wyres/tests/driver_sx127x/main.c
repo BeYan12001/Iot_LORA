@@ -11,8 +11,18 @@
 /**
  * @ingroup     tests
  * @{
- * @file
- * @brief       Test application for SX127X modem driver
+ * @file        main.c
+ * @brief       Point d'entrée de l'application de test du driver SX127x.
+ *
+ * Ce fichier initialise le shell RIOT et enregistre toutes les commandes
+ * disponibles pour interagir avec le modem LoRa SX127x via la ligne de commande
+ * (port série).
+ *
+ * Architecture du projet :
+ *  - radio_commands.c : initialisation et configuration de la radio
+ *  - receiver.c       : thread de réception asynchrone + callback netdev
+ *  - message_store.c  : stockage, filtrage, favoris
+ *  - relay.c          : logique de relais multi-sauts basée sur le SNR
  *
  * @author      Eugene P. <ep@unwds.com>
  * @author      José Ignacio Alamos <jose.alamos@inria.cl>
@@ -28,42 +38,33 @@
 #include "radio_commands.h"
 #include "relay.h"
 
-static int test_cmd(int argc, char **argv)
-{
-    for (int i = 1; i < argc; i++) {
-        if (i > 1) {
-            printf(" ");
-        }
-        printf("%s", argv[i]);
-    }
-    if (argc > 1) {
-        printf("\n");
-    }
-    return 0;
-}
-
+/**
+ * @brief Table des commandes shell enregistrées.
+*/
 static const shell_command_t shell_commands[] = {
-    { "init", "Initialize SX1272", init_sx1272_cmd },
-    { "setup", "Initialize LoRa modulation settings", lora_setup_cmd },
-    { "implicit", "Enable implicit header", implicit_cmd },
-    { "crc", "Enable CRC", crc_cmd },
-    { "payload", "Set payload length (implicit header)", payload_cmd },
-    { "random", "Get random number from sx127x", random_cmd },
-    { "syncword", "Get/Set the syncword", syncword_cmd },
-    { "rx_timeout", "Set the RX timeout", rx_timeout_cmd },
-    { "channel", "Get/Set channel frequency (in Hz)", channel_cmd },
-    { "register", "Get/Set value(s) of registers of sx127x", register_cmd },
-    { "send", "Send raw payload string", send_cmd },
-    { "threshold", "Get/Set relay SNR threshold", threshold_cmd },
-    { "listen", "Listen: [favoris] [@src...] [#dst...] (no args = all)", listen_cmd },
-    { "reset", "Reset the sx127x device", reset_cmd },
-    { "test", "Test the sx127x device", test_cmd },
-    { "memory", "Memory all messages", memory_cmd },
-    { "filter", "Filter messages by src/dst", filter_cmd },
-    { "favoris", "Manage favorites: list | add | remove | clear", favoris_cmd },
+    { "init",      "Initialise le SX127x et démarre la radio",        init_sx1272_cmd },
+    { "setup",     "Configure BW / SF / CR du modem LoRa",            lora_setup_cmd },
+    { "implicit",  "Active/désactive le header implicite",            implicit_cmd },
+    { "crc",       "Active/désactive la vérification CRC",            crc_cmd },
+    { "payload",   "Définit la taille payload (header implicite)",    payload_cmd },
+    { "random",    "Génère un nombre aléatoire via le SX127x",        random_cmd },
+    { "syncword",  "Lit/écrit le syncword LoRa",                      syncword_cmd },
+    { "rx_timeout","Configure le timeout de réception",               rx_timeout_cmd },
+    { "channel",   "Lit/écrit la fréquence du canal (Hz)",            channel_cmd },
+    { "register",  "Lit/écrit les registres internes du SX127x",      register_cmd },
+    { "send",      "Envoie un message LoRa formaté",                  send_cmd },
+    { "threshold", "Lit/écrit le seuil SNR de relais",                threshold_cmd },
+    { "listen",    "Écoute : [favoris] [@src...] [#dst...] (défaut: tout)", listen_cmd },
+    { "reset",     "Réinitialise le SX127x",                          reset_cmd },
+    { "memory",    "Affiche les messages stockés en mémoire",         memory_cmd },
+    { "filter",    "Filtre les messages par src ou dst",              filter_cmd },
+    { "favoris",   "Gère les favoris : list | add | remove | clear",  favoris_cmd },
     { NULL, NULL, NULL }
 };
 
+/**
+ * @brief Point d'entrée principal de l'application.
+*/
 int main(void)
 {
     puts("Initialization successful - starting the shell now");

@@ -26,11 +26,19 @@
 #include "radio_commands.h"
 #include "receiver.h"
 
+/* Instance unique du modem SX127x pour toute l'application */
 static sx127x_t sx127x;
 
+/* Identifiant source par défaut de ce noeud (4 caractères fixes) */
 static char src[NAME_BUF_SIZE] = "B2MG";
+
+/* Destination par défaut : le salon #M2G */
 static char dst[ADDRESS_BUF_SIZE] = "#M2G";
+
+/* TTL initial des messages envoyés (nombre de sauts maximum) */
 static int ttl = 5;
+
+/* Compteur de séquence, incrémenté à chaque envoi pour identifier les messages */
 static int compteur = 1;
 
 netdev_t *app_netdev(void)
@@ -43,6 +51,16 @@ sx127x_t *app_radio(void)
     return &sx127x;
 }
 
+/**
+ * @brief Envoie un payload brut via le modem LoRa.
+ *
+ * Construit un iolist (liste de buffers) et appelle le driver netdev.
+ * On envoie payload_len + 1 octets pour inclure le terminateur nul,
+ * ce qui permet au récepteur de traiter directement la chaîne reçue.
+ *
+ * @param payload Chaîne null-terminée à envoyer.
+ * @return 0 si l'envoi est lancé, -1 si la radio est déjà en train d'émettre.
+ */
 int app_send_payload(char *payload)
 {
     size_t payload_len = strlen(payload);
@@ -52,7 +70,7 @@ int app_send_payload(char *payload)
 
     iolist_t iolist = {
         .iol_base = payload,
-        .iol_len  = payload_len + 1
+        .iol_len  = payload_len + 1  /* +1 pour le '\0' terminal */
     };
 
     netdev_t *netdev = app_netdev();
@@ -64,6 +82,7 @@ int app_send_payload(char *payload)
 
     return 0;
 }
+
 
 int lora_setup_cmd(int argc, char **argv)
 {
@@ -111,12 +130,13 @@ int lora_setup_cmd(int argc, char **argv)
         puts("[Error ]setup: invalid coding rate value given");
         return -1;
     }
+    /* RIOT encode le CR comme un offset de 4 : CR=5 → lora_cr=1, CR=8 → lora_cr=4 */
     uint8_t lora_cr = (uint8_t)(cr - 4);
 
     netdev_t *netdev = app_netdev();
-    netdev->driver->set(netdev, NETOPT_BANDWIDTH, &lora_bw, sizeof(lora_bw));
+    netdev->driver->set(netdev, NETOPT_BANDWIDTH,       &lora_bw, sizeof(lora_bw));
     netdev->driver->set(netdev, NETOPT_SPREADING_FACTOR, &lora_sf, sizeof(lora_sf));
-    netdev->driver->set(netdev, NETOPT_CODING_RATE, &lora_cr, sizeof(lora_cr));
+    netdev->driver->set(netdev, NETOPT_CODING_RATE,     &lora_cr, sizeof(lora_cr));
 
     puts("[Info] setup: configuration set with success");
     return 0;
@@ -151,6 +171,7 @@ int register_cmd(int argc, char **argv)
         }
 
         if (strcmp(argv[2], "all") == 0) {
+            /* Affichage tabulaire : 16 registres par ligne, adresses en colonne */
             puts("- listing all registers -");
             uint8_t reg = 0;
             uint8_t data = 0;
@@ -177,6 +198,7 @@ int register_cmd(int argc, char **argv)
             return 0;
         }
         else {
+            /* Lecture d'un seul registre : supporte la notation décimale et 0xNN */
             long int num = 0;
 
             if (strstr(argv[2], "0x") != NULL) {
@@ -206,6 +228,7 @@ int register_cmd(int argc, char **argv)
         long num;
         long val;
 
+        /* Support notation hex (0x..) et décimale pour le numéro de registre */
         if (strstr(argv[2], "0x") != NULL) {
             num = strtol(argv[2], NULL, 16);
         }
@@ -213,6 +236,7 @@ int register_cmd(int argc, char **argv)
             num = atoi(argv[2]);
         }
 
+        /* Support notation hex (0x..) et décimale pour la valeur */
         if (strstr(argv[3], "0x") != NULL) {
             val = strtol(argv[3], NULL, 16);
         }
@@ -238,6 +262,8 @@ int send_cmd(int argc, char **argv)
     }
 
     char payload[MESSAGE_BUF_SIZE];
+
+    /* Construction de l'en-tête : "SSSS#DDDD:compteur,ttl:" */
     int payload_len = snprintf(payload, sizeof(payload), "%s%s:%d,%d:",
                                src, dst, compteur, ttl);
     if (payload_len < 0 || (size_t)payload_len >= sizeof(payload)) {
@@ -245,6 +271,7 @@ int send_cmd(int argc, char **argv)
         return -1;
     }
 
+    /* Ajout du contenu du message argument par argument */
     for (int i = 1; i < argc; i++) {
         int written = snprintf(payload + payload_len,
                                sizeof(payload) - (size_t)payload_len,
@@ -257,7 +284,7 @@ int send_cmd(int argc, char **argv)
         payload_len += written;
     }
 
-    compteur++;
+    compteur++;  /* Incrémente après construction pour le prochain message */
     return app_send_payload(payload);
 }
 
@@ -432,17 +459,19 @@ int init_sx1272_cmd(int argc, char **argv)
     (void)argc;
     (void)argv;
 
+    /* Paramètres hardware définis dans sx127x_params.h (selon le board) */
     sx127x.params = sx127x_params[0];
 
     netdev_t *netdev = app_netdev();
     netdev->driver = &sx127x_driver;
-    netdev->event_callback = app_event_cb;
+    netdev->event_callback = app_event_cb;  /* Callback appelé à chaque événement radio */
 
     if (netdev->driver->init(netdev) < 0) {
         puts("Failed to initialize SX127x device, exiting");
         return 1;
     }
 
+    /* Démarrage du thread RIOT dédié au traitement des événements de réception */
     kernel_pid_t recv_pid = app_start_recv_thread();
     if (recv_pid <= KERNEL_PID_UNDEF) {
         puts("Creation of receiver thread failed");
