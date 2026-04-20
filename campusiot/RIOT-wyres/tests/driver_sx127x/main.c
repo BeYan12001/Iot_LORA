@@ -14,10 +14,6 @@
  * @file        main.c
  * @brief       Point d'entrée de l'application de test du driver SX127x.
  *
- * Ce fichier initialise le shell RIOT et enregistre toutes les commandes
- * disponibles pour interagir avec le modem LoRa SX127x via la ligne de commande
- * (port série).
- *
  * Architecture du projet :
  *  - radio_commands.c : initialisation et configuration de la radio
  *  - receiver.c       : thread de réception asynchrone + callback netdev
