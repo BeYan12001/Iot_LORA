@@ -1,3 +1,0 @@
-# Auteurs
-
-* Didier DONSEZ
